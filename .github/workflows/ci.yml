@@ -1,153 +1,75 @@
-name: ci
+name: CI
 
-on: [pull_request, push]
-
-permissions:
-    contents: write
-    pull-requests: write
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      type:
+        description: 'Type (edge/proxy)'
+        default: 'edge'
+        required: true
 
 jobs:
-    ci:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-              if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push'
-              with:
-                  # Required for `release: merge dev -> master and promote dev`
-                  token: ${{secrets.GH_TOKEN}}
-            - uses: actions/checkout@v4
-              if: ((github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push') == false
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 20
-                  registry-url: https://registry.npmjs.org/
-                  cache: npm
-            - name: Install dependencies
-              run: npm ci
-            - name: Build
-              run: npm run build
-            - name: Lint
-              run: |
-                  npm run pretty:check
-                  npm run eslint
-            - name: Test
-              run: npm run test-with-coverage
-            - name: Docker login
-              if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push'
-              run: echo ${{ secrets.DOCKER_KEY }} | docker login -u koenkk --password-stdin
-            - name: Docker login ghcr.io
-              if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push'
-              run: echo ${{ secrets.GH_TOKEN }} | docker login ghcr.io -u koenkk --password-stdin
-            - name: Docker setup - QEMU
-              if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push'
-              uses: docker/setup-qemu-action@v3
-              with:
-                  platforms: all
-            - name: Docker setup - Buildx
-              if: (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/')) && github.event_name == 'push'
-              id: buildx
-              uses: docker/setup-buildx-action@v3
-              with:
-                  version: latest
-            - name: 'dev: Docker build'
-              if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
-              run: |
-                  docker buildx build \
-                    --build-arg COMMIT=$(git rev-parse --short HEAD) \
-                    --platform linux/arm64/v8,linux/386,linux/amd64,linux/arm/v6,linux/arm/v7 \
-                    -f docker/Dockerfile \
-                    --provenance=false \
-                    --push \
-                    -t koenkk/zigbee2mqtt:latest-dev -t ghcr.io/koenkk/zigbee2mqtt:latest-dev \
-                    .
-            - name: 'release: Docker build'
-              if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-              run: |
-                  TAG="$(git describe --tags)"
-                  docker buildx build \
-                    --build-arg COMMIT=$(git rev-parse --short HEAD) \
-                    --platform linux/arm64/v8,linux/386,linux/amd64,linux/arm/v6,linux/arm/v7 \
-                    -f docker/Dockerfile \
-                    --provenance=false \
-                    --push \
-                    -t koenkk/zigbee2mqtt:latest -t "koenkk/zigbee2mqtt:$TAG" -t ghcr.io/koenkk/zigbee2mqtt:latest -t "ghcr.io/koenkk/zigbee2mqtt:$TAG" \
-                    .
-            - name: 'release: Publish to npm'
-              if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-              run: npm publish
-              env:
-                  NODE_AUTH_TOKEN: ${{secrets.NPM_TOKEN }}
-            - name: 'dev: Trigger zigbee2mqtt/hassio-zigbee2mqtt build'
-              if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
-              run: |
-                  curl \
-                    -X POST \
-                    -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
-                    -H "Accept: application/vnd.github.v3+json" \
-                    https://api.github.com/repos/zigbee2mqtt/hassio-zigbee2mqtt/actions/workflows/ci.yml/dispatches \
-                    -d '{"ref":"master","inputs":{}}'
-            - name: 'release: Trigger zigbee2mqtt/hassio-zigbee2mqtt build'
-              if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-              run: |
-                  TAG=${GITHUB_REF#refs/*/}
-                  echo "Triggering with tag '$TAG'"
-                  curl \
-                    -X POST \
-                    -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
-                    -H "Accept: application/vnd.github.everest-preview+json" \
-                    -H "Content-Type: application/json" \
-                    https://api.github.com/repos/zigbee2mqtt/hassio-zigbee2mqtt/dispatches \
-                    --data "{\"event_type\": \"release\", \"client_payload\": { \"version\": \"$TAG-1\"}}"
-            - name: 'release: Trigger zigbee2mqtt-chart image update'
-              if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-              run: |
-                  TAG=${GITHUB_REF#refs/*/}
-                  echo "Triggering with tag '$TAG'"
-                  curl -L \
-                    -X POST \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "Authorization: Bearer ${{ secrets.GH_TOKEN }}" \
-                    -H "X-GitHub-Api-Version: 2022-11-28" \
-                    https://api.github.com/repos/Koenkk/zigbee2mqtt-chart/actions/workflows/on_zigbee2mqtt_release.yaml/dispatches \
-                    --data "{\"ref\": \"main\", \"inputs\": { \"zigbee2mqtt_version\": \"$TAG\"}}"
-            - name: 'release: merge dev -> master and promote dev'
-              if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
-              run: |
-                  TAG=${GITHUB_REF#refs/*/}
-                  git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-                  git config --local user.name "github-actions[bot]"
-                  git fetch --unshallow
-                  git fetch origin
-                  git checkout master
-                  git merge --ff-only origin/dev
-                  git push origin master
-                  git checkout dev
-                  jq --indent 4 ".version = \"$TAG-dev\"" package.json > package.json.tmp
-                  jq --indent 4 ".version = \"$TAG-dev\"" package-lock.json > package-lock.json.tmp
-                  mv package.json.tmp package.json
-                  mv package-lock.json.tmp package-lock.json
-                  git add -A
-                  git commit -m "chore: promote to dev"
-                  git push origin dev
+  variables:
+    runs-on: ubuntu-latest
+    outputs:
+      ARCH_LIST: ${{ env.ARCH_LIST }}
+      ADDON_LIST: ${{ env.ADDON_LIST }}
+      DOCKER_ARGS: ${{ env.DOCKER_ARGS }}
+    steps:
+    - uses: actions/checkout@v3
 
-    tests:
-        strategy:
-            matrix:
-                os: [ubuntu-latest, macos-latest, windows-latest]
-                node: [18, 20, 22]
-        runs-on: ${{ matrix.os }}
-        continue-on-error: true
-        steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: ${{ matrix.node }}
-                  registry-url: https://registry.npmjs.org/
-                  cache: 'npm'
-            - name: Install dependencies
-              # --ignore-scripts prevents the serialport build which often fails on Windows
-              run: npm ci --ignore-scripts
-            - name: Build
-              run: npm run build
-            - name: Test
-              run: npm run test-with-coverage
+    - name: "ARGS: default"
+      run: |
+        echo "ADDON_LIST=['zigbee2mqtt', 'zigbee2mqtt-edge']" >> $GITHUB_ENV
+        echo "DOCKER_ARGS=--no-latest --test" >> $GITHUB_ENV
+    - name: "ARGS: zigbee2mqtt-proxy" # Build of addon proxy version
+      if: github.ref == 'refs/heads/master' && (github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'proxy')
+      run: |
+        echo "ADDON_LIST=['zigbee2mqtt-proxy']" >> $GITHUB_ENV
+        echo "DOCKER_ARGS=--no-cache" >> $GITHUB_ENV
+    - name: "ARGS: zigbee2mqtt-edge" # Build of addon edge version
+      if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.type == 'edge'))
+      run: |
+        echo "ADDON_LIST=['zigbee2mqtt-edge']" >> $GITHUB_ENV
+        echo "DOCKER_ARGS=--no-cache" >> $GITHUB_ENV
+    - name: "ARGS: zigbee2mqtt" # Build of addon release version
+      if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+      run: |
+        echo "ADDON_LIST=['zigbee2mqtt']" >> $GITHUB_ENV
+        echo "DOCKER_ARGS=--no-cache --docker-hub-check" >> $GITHUB_ENV
+
+    - name: Determine arch
+      id: determine_arch
+      run: |
+        ARCH_LIST=$(jq -r -c '.arch' ./${{ fromJSON(env.ADDON_LIST)[0] }}/config.json)
+        echo "Found the following arches: $ARCH_LIST"
+        echo "ARCH_LIST=$ARCH_LIST" >> $GITHUB_ENV
+
+  build:
+    runs-on: ubuntu-latest
+    needs: variables
+    env:
+      DOCKER_ARGS: ${{needs.variables.outputs.DOCKER_ARGS}}
+    strategy:
+      matrix:
+        arch: ${{fromJSON(needs.variables.outputs.ARCH_LIST)}}
+        addon: ${{fromJSON(needs.variables.outputs.ADDON_LIST)}}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Docker login
+      if: (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/')) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      run: echo ${{ secrets.DOCKER_KEY }} | docker login -u koenkk --password-stdin
+    - name: Build
+      run: |
+        if [ "${{ matrix.addon }}" != "zigbee2mqtt-proxy" ]; then
+          cp -R common/rootfs ${{ matrix.addon }}
+          cp common/Dockerfile ${{ matrix.addon }}
+        fi
+        cp common/build.yaml ${{ matrix.addon }}
+        docker run --rm --privileged \
+            -v /home/runner/.docker:/root/.docker \
+            -v /run/docker.sock:/run/docker.sock:rw \
+            -v $(pwd)/${{ matrix.addon }}:/data homeassistant/amd64-builder --${{ matrix.arch }} -t /data \
+            ${{ env.DOCKER_ARGS }}
